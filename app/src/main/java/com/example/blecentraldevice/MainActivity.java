@@ -2,6 +2,10 @@ package com.example.blecentraldevice;
 
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothGatt;
+import android.bluetooth.BluetoothGattCallback;
+import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.content.Context;
@@ -63,8 +67,21 @@ public class MainActivity extends AppCompatActivity {
     BluetoothLeScanner bluetoothLeScanner;
     BluetoothAdapter bluetoothAdapter;
     BluetoothManager bluetoothManager;
+    BluetoothGatt mBluetoothGatt;
+    //----------------------------------------------
+    ListView listServChar;
+    ArrayAdapter<String> adapterServChar;
+    ArrayList<String> listServCharUUID = new ArrayList<>();
+    //----------------------------------------------
+    Button txButton;
+    Button rxButton;
+    
+    int alertStatus = 0;
+    BluetoothGattService serviceAlert, servicePower;
+    BluetoothGattCharacteristic characteristicAlert, characteristicPower;
 
 
+    @SuppressLint("MissingPermission")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -102,15 +119,39 @@ public class MainActivity extends AppCompatActivity {
         deviceListView.setOnItemClickListener((adapterView, view, position, id) -> {
             stopScanning();
             device = deviceList.get(position);
-            //mBluetoothGatt = device.connectGatt(MainActivity.this, false, gattCallback);
+            mBluetoothGatt = device.connectGatt(MainActivity.this, false, gattCallback);
         });
         //--------------------------------------------------------------
         deviceList = new ArrayList<>();
         initializeBluetooth();
+        //--------------------------------------------------------------
+        listServChar = findViewById(R.id.listView2);
+        adapterServChar = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1);
+        listServChar.setAdapter(adapterServChar);
+        listServChar.setOnItemClickListener((adapterView, view, position, id) -> {
+            String uuid = listServCharUUID.get(position);
+            CharactRxData(uuid);
+        });
+        //--------------------------------------------------------------
+        txButton = findViewById(R.id.button3);
+        txButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                CharactTx();
+            }
+        });
+        rxButton = findViewById(R.id.button4);
+        rxButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                CharactRx();
+            }
+        });
     }
     //*****************************************************************************************
     //                  S C A N   F U N C T
     //*****************************************************************************************
+    @SuppressLint("MissingPermission")
     public void startScanning() {
         if (!bluetoothAdapter.isEnabled()) {
             promptEnableBluetooth();
@@ -131,21 +172,11 @@ public class MainActivity extends AppCompatActivity {
 
             ScanSettings.Builder settingsBuilder = new ScanSettings.Builder();
             settingsBuilder.setLegacy(false);
-
-           //--------------------------------------------------------------------------------------
-            /*
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                // Request the permission
-                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_SCAN}, BLUETOOTH_SCAN);
-            } else {
-                // Permission already granted, proceed with file operation
-            }
-            */
-
             AsyncTask.execute(() -> bluetoothLeScanner.startScan(leScanCallBack));
         }
     }
 
+    @SuppressLint("MissingPermission")
     public void stopScanning() {
         stopScanningButton.setEnabled(false);
         startScanningButton.setEnabled(true);
@@ -158,23 +189,27 @@ public class MainActivity extends AppCompatActivity {
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
         bluetoothLeScanner = bluetoothAdapter.getBluetoothLeScanner();
     }
+
     private boolean hasPermission(String permissionType) {
         return ContextCompat.checkSelfPermission(this, permissionType) == PackageManager.PERMISSION_GRANTED;
     }
+
     private void promptEnableBluetooth() {
         if (!bluetoothAdapter.isEnabled()) {
             Intent enableIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
             activityResultLauncher.launch(enableIntent);
         }
     }
+
     ActivityResultLauncher<Intent> activityResultLauncher = registerForActivityResult(
-        new ActivityResultContracts.StartActivityForResult(),
-        result -> {
-            if (result.getResultCode() != MainActivity.RESULT_OK) {
-                promptEnableBluetooth();
+            new ActivityResultContracts.StartActivityForResult(),
+            result -> {
+                if (result.getResultCode() != MainActivity.RESULT_OK) {
+                    promptEnableBluetooth();
+                }
             }
-        }
-     );
+    );
+
     private void requestLocationPermission() {
         if (hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)) {
             return;
@@ -187,6 +222,7 @@ public class MainActivity extends AppCompatActivity {
             alertDialog.show();
         });
     }
+
     //************************************************************************************
     //                      S C A N   C A L L   B A C K
     //************************************************************************************
@@ -202,12 +238,14 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         }
+
         @Override
         public void onScanFailed(int errorCode) {
             super.onScanFailed(errorCode);
             Log.e(TAG, "onScanFailed: code:" + errorCode);
         }
     };
+
     //************************************************************************************
     @SuppressLint("MissingPermission")
     //    Called by ScanCallBack function to check if the device is already present in listAdapter or not.
@@ -238,6 +276,7 @@ public class MainActivity extends AppCompatActivity {
         deviceList.add(device);
         return false;
     }
+
     //************************************************************************************
     private String rssiStrengthPic(int rs) {
         if (rs > -45) {
@@ -255,4 +294,147 @@ public class MainActivity extends AppCompatActivity {
             return "";
     }
     //************************************************************************************
+    //                      C O N N E C T   C A L L   B A C K
+    //************************************************************************************
+    //    The connectGatt method requires a BluetoothGattCallback
+    //    Here the results of connection state changes and services discovery would be delivered asynchronously.
+
+    protected BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
+        //*********************************************************************************
+        private volatile boolean isOnCharacteristicReadRunning = false;
+
+        @SuppressLint("MissingPermission")
+        @Override
+        public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+            super.onConnectionStateChange(gatt, status, newState);
+            String address = gatt.getDevice().getAddress();
+
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                if (newState == BluetoothGatt.STATE_CONNECTED) {
+                    Log.w(TAG, "onConnectionStateChangeMy() - Successfully connected to " + address);
+                    boolean discoverServicesOk = gatt.discoverServices();
+                    Log.i(TAG, "onConnectionStateChange: discovered Services: " + discoverServicesOk);
+                } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+                    Log.w(TAG, "onConnectionStateChangeMy() - Successfully disconnected from " + address);
+                    gatt.close();
+                }
+            } else {
+                Log.w(TAG, "onConnectionStateChangeMy: Error " + status + " encountered for " + address);
+            }
+        }
+        //************************************************************************************
+        @SuppressLint("MissingPermission")
+        @Override
+        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+            super.onServicesDiscovered(gatt, status);
+            final List<BluetoothGattService> services = gatt.getServices();
+            runOnUiThread(() -> {
+
+                for (int i = 0; i < services.size(); i++) {
+                    BluetoothGattService service = services.get(i);
+                    List<BluetoothGattCharacteristic> characteristics = service.getCharacteristics();
+                    StringBuilder log = new StringBuilder("\nService Id: \n" + "UUID: " + service.getUuid().toString());
+
+                    adapterServChar.add("     Service UUID : " + service.getUuid().toString());
+                    listServCharUUID.add(service.getUuid().toString());
+
+                    for (int j = 0; j < characteristics.size(); j++) {
+                        BluetoothGattCharacteristic characteristic = characteristics.get(j);
+                        String characteristicUuid = characteristic.getUuid().toString();
+
+                        log.append("\n   Characteristic: ");
+                        log.append("\n   UUID: ").append(characteristicUuid);
+
+                        if (characteristicUuid.equals("00002a06-0000-1000-8000-00805f9b34fb")) {
+                            characteristicAlert = characteristic;
+                            serviceAlert = service;
+                        }
+                        if (characteristicUuid.equals("00002a07-0000-1000-8000-00805f9b34fb")) {
+                            characteristicPower = characteristic;
+                            servicePower = service;
+                        }
+
+                        adapterServChar.add("Charact UUID : " + characteristicUuid);
+                        listServCharUUID.add(service.getUuid().toString());
+                    }
+                    Log.d(TAG, "\nonServicesDiscovered: New Service: " + log);
+                }
+            });
+        }
+        //************************************************************************************
+        //public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic c, int stat) {}
+        @Override
+        public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
+            super.onCharacteristicWrite(gatt, characteristic, status);
+
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                textViewTemp.setText("Запись " + Integer.toString(alertStatus) + " успешна");
+                Log.i(TAG, "onCharacteristicRead: Write characteristic: UUID: " + characteristic.getUuid().toString());
+            } else if (status == BluetoothGatt.GATT_READ_NOT_PERMITTED) {
+                Log.e(TAG, "onCharacteristicRead: Write not permitted for " + characteristic.getUuid().toString());
+            } else {
+                Log.e(TAG, "onCharacteristicRead: Characteristic write failed for " + characteristic.getUuid().toString());
+            }
+        }
+        //************************************************************************************
+        //public void onCharacteristicRead(BluetoothGatt g, BluetoothGattCharacteristic c, int stat) {}
+        @Override
+        public void onCharacteristicRead(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
+
+            super.onCharacteristicRead(gatt, characteristic, status);
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.i(TAG, "onCharacteristicRead: Read characteristic: UUID: " + characteristic.getUuid().toString());
+
+                byte[] valueInputCode = new byte[characteristic.getValue().length];
+                System.arraycopy(characteristic.getValue(), 0, valueInputCode, 0, characteristic.getValue().length);
+
+                StringBuffer sb1 = new StringBuffer();
+                for (int j = 0; j < valueInputCode.length; j++) {
+                    sb1.append(String.format("%02X", valueInputCode[j]));
+                }
+                Log.i(TAG, "onCharacteristicRead: Value: " + sb1);
+                textViewTemp.setText("Уровень мощности = " + sb1.toString());
+
+            } else if (status == BluetoothGatt.GATT_READ_NOT_PERMITTED) {
+                Log.e(TAG, "onCharacteristicRead: Read not permitted for " + characteristic.getUuid().toString());
+            } else {
+                Log.e(TAG, "onCharacteristicRead: Characteristic read failed for " + characteristic.getUuid().toString());
+            }
+        }
+    };
+    //************************************************************************************
+    //************************************************************************************
+    public void CharactRxData(String uuid)
+    {
+        Log.d(TAG, "UUID : " + uuid);
+        textViewTemp.setText(uuid);
+    }
+    //************************************************************************************
+    public boolean CharactTx()
+    {
+        if ((mBluetoothGatt == null) || (serviceAlert == null) || (characteristicAlert == null)) {
+            return false;
+        }
+        alertStatus ^= 0x01;
+        byte[] alert = new byte[1];
+        alert[0] = (byte)alertStatus;
+
+        characteristicAlert.setValue(alert);
+        characteristicAlert.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 0);
+        }
+        mBluetoothGatt.writeCharacteristic(characteristicAlert);
+        return true;
+    }
+    //************************************************************************************
+    @SuppressLint("MissingPermission")
+    public void CharactRx()
+    {
+        mBluetoothGatt.readCharacteristic(characteristicPower);
+    }
 }
+//****************************************************************************************
+//****************************************************************************************
+
